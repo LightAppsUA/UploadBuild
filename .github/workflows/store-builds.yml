@@ -1,0 +1,125 @@
+name: Store builds
+
+on:
+  schedule:
+    - cron: "0 4 * * *"
+  workflow_dispatch:
+
+jobs:
+  purge_builds:
+    runs-on: macos-15
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set Git user identity
+        run: |
+          git config --global user.email "actions@github.com"
+          git config --global user.name "GitHub Actions"
+
+      - name: Combine split archives, rename with bundle identifier, and upload to R2
+        env:
+          BASE_URL: ${{ secrets.BASE_URL }}
+          AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          R2_ENDPOINT: ${{ secrets.R2_ENDPOINT }}
+          R2_BUCKET: ${{ secrets.R2_BUCKET }}
+        run: |
+          pip install awscli
+
+          (cd extract-info && swift build)
+
+          mkdir -p processed tmp builds
+
+          # Fetch list of zip files from API
+          response=$(curl -s "$BASE_URL/builds/list.php")
+          
+          # Check if response is valid JSON and has files
+          if ! echo "$response" | jq -e '.files' > /dev/null 2>&1; then
+            echo "⚠️ No builds found or invalid API response"
+            exit 0
+          fi
+          
+          zip_files=$(echo "$response" | jq -r '.files[].name' | grep -E '\.zip$' || true)
+
+          if [ -z "$zip_files" ]; then
+            echo "⚠️ No zip files found in builds"
+            exit 0
+          fi
+
+          for zip_name in $zip_files; do
+            (
+              set -e  # Exit on any error
+              base_name=$(basename "$zip_name" .zip)
+              zip_path="builds/$zip_name"
+
+              # Download the zip file
+              echo "⬇️ Downloading $zip_name"
+              curl -s -o "$zip_path" "$BASE_URL/builds/$zip_name"
+              
+              echo "🧩 Processing archive: $base_name"
+
+              if ! unzip -o "$zip_path" -d tmp/unpacked > /dev/null 2>&1; then
+                echo "❌ Failed to unzip $base_name — skipping"
+                exit 1
+              fi
+              
+              proj_path=$(find tmp/unpacked -path '*__MACOSX*' -prune -o -name '*.xcodeproj' -print | head -n 1)
+
+              if [ -z "$proj_path" ]; then
+                echo "❌ .xcodeproj not found"
+                exit 1
+              fi
+
+              ./extract-info/.build/debug/extract-info "$proj_path" > tmp/project.json
+
+              bundle_id=$(jq -r '.bundle_id' tmp/project.json | grep -m1 .)
+              version=$(jq -r '.version' tmp/project.json | grep -m1 .)
+
+              # Check if bundle_id or version is empty/null in JSON
+              if [ -z "$bundle_id" ] || [ "$bundle_id" = "null" ] || [ -z "$version" ] || [ "$version" = "null" ]; then
+                echo "❌ Empty bundle_id or version in JSON for $base_name — skipping"
+                exit 1
+              fi
+              unique_suffix="${base_name: -10}"
+
+              clean_version=$(printf "%s" "$version" | tr -c '[:alnum:].' -)
+              clean_bundle_id=$(printf "%s" "$bundle_id" | tr -c '[:alnum:].-' -)
+              new_name="${clean_version}-${unique_suffix}.zip"
+              
+              echo "📦 Final name: $clean_bundle_id/$new_name"
+
+              mkdir -p "processed/$clean_bundle_id"
+              mv "$zip_path" "processed/$clean_bundle_id/$new_name"
+              rm -rf tmp/unpacked tmp/project.json
+              
+              # Delete the zip file via API after successful processing
+              echo "🗑️ Deleting $zip_name via API"
+              curl -s -X POST "$BASE_URL/builds/delete.php" \
+                -d "name=$zip_name" > /dev/null
+            ) || {
+              echo "❌ Error processing $zip_path — continuing to next file"
+              rm -f tmp/project.json
+              rm -rf tmp/unpacked
+
+              # Delete the zip file via API after failed processing
+              echo "🗑️ Deleting $zip_name via API"
+              curl -s -X POST "$BASE_URL/builds/delete.php" \
+                -d "name=$zip_name" > /dev/null
+            }
+          done
+
+          # Upload processed files to R2
+          processed_files=$(find processed -name '*.zip' 2>/dev/null || true)
+          if [ -z "$processed_files" ]; then
+            echo "⚠️ No processed files to upload"
+            exit 0
+          fi
+          
+          for file in $processed_files; do
+            relative_path=$(echo "$file" | sed 's|^processed/||')
+            echo "⬆️ Uploading $relative_path to R2"
+            aws s3 cp "$file" "s3://$R2_BUCKET/$relative_path" --endpoint-url "$R2_ENDPOINT"
+          done

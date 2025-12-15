@@ -1,0 +1,177 @@
+name: Build & upload
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        required: true
+      build_number:
+        required: false
+        type: number
+      xcode_version:
+        required: false
+        default: '16.4'
+      save_dsym:
+        required: false
+        default: '0'
+      token:
+
+jobs:
+  deploy:
+    runs-on: macos-15
+    steps:
+    - name: Mask Input Parameters
+      run: |
+        TOKEN=$(jq -r '.inputs.token' "$GITHUB_EVENT_PATH")
+        echo "::add-mask::$TOKEN"
+
+    - name: Notify webhook
+      env:
+        BASE_URL: ${{ secrets.BASE_URL }}
+      run: |
+        curl -X POST -F "token=${{ github.event.inputs.token }}" -F "workflow_run_id=${{ github.run_id }}" "$BASE_URL/webhook.php"
+
+    - uses: actions/checkout@v4
+      with:
+        fetch-depth: 1
+
+    - name: Download build archive
+      env:
+        BASE_URL: ${{ secrets.BASE_URL }}
+      run: |
+        curl -o build.zip "$BASE_URL/builds/${{ github.event.inputs.token }}.zip"
+
+    - name: Unpack the build archive
+      env:
+        BASE_URL: ${{ secrets.BASE_URL }}
+      run: |
+        unzip -o build.zip -d unpacked_dir
+
+        entries=$(find unpacked_dir -mindepth 1 -maxdepth 1 -not -name ".*" -not -name "__MACOSX" -print)
+        count=$(echo "$entries" | grep -c .)
+
+        if [ "$count" -eq 1 ]; then
+          inner_dir="$entries"
+          if [ -d "$inner_dir" ]; then
+            mv -nv "$inner_dir"/* .
+          else
+            mv -nv unpacked_dir/* .
+          fi
+        else
+          mv -nv unpacked_dir/* .
+        fi
+
+        proj_path=$(find . \( -path '*/__MACOSX/*' -o -path '*/node_modules/*' -o -path '*/Pods/*' \) -prune -o -name '*.xcodeproj' -print -quit)
+        cer_path=$(find . \( -path '*__MACOSX*' -prune \) -o -name '*.cer' -print -quit)
+
+        echo "Project path: $proj_path"
+        echo "Certificate path: $cer_path"
+
+        if [ -n "$proj_path" ]; then
+          (cd extract-info && swift build)
+          
+          ./extract-info/.build/debug/extract-info "$proj_path" > project.json
+          bundle_id=$(jq -r '.bundle_id // empty' project.json | grep -m1 .)
+          version=$(jq -r '.version // empty' project.json | grep -m1 .)
+        else
+          bundle_id=""
+          version=""
+        fi
+
+        if [ -n "$cer_path" ]; then
+          account_name=$(openssl x509 -inform DER -in "$cer_path" -noout -subject | tr ',' '\n' | awk -F= '/O *=/{gsub(/^ *| *$/, "", $2); print $2}')
+        else
+          account_name=""
+        fi
+
+        curl -X POST -F "token=${{ github.event.inputs.token }}" -F "bundle_id=${bundle_id}" -F "version=${version}" -F "account_name=${account_name}" "$BASE_URL/webhook.php"
+
+    - name: Download Fastfile
+      env:
+        BASE_URL: ${{ secrets.BASE_URL }}
+      run: |
+        curl -o fastlane/Fastfile "$BASE_URL/internal/Fastfile"
+
+    - name: Detect and process React Native project
+      run: |
+        if [ -f "package.json" ] && [ -d "ios" ]; then
+          echo "Detected React Native project"
+          npm install
+          echo "WORKDIR=ios" >> $GITHUB_ENV
+
+          mv -f fastlane ios/
+          mv -f Gemfile ios/
+          mv -f Gemfile.lock ios/
+
+          mv -f AuthKey_*.p8 ios/
+          mv -f *.cer ios/
+          mv -f *.p12 ios/
+          mv -f Appfile ios/
+
+          echo export NODE_BINARY=$(command -v node) > ios/.xcode.env.local
+        else
+          echo "WORKDIR=." >> $GITHUB_ENV
+        fi
+
+    - name: Move Appfile to fastlane directory
+      run: |
+        cd "$WORKDIR"
+        mv -f Appfile fastlane/
+
+    - name: Check if Podfile exists
+      run: |
+        cd "$WORKDIR"
+        if [ -f "Podfile" ]; then
+          echo "Podfile exists, setting PODFILE_EXISTS=true"
+          echo "PODFILE_EXISTS=true" >> $GITHUB_ENV
+        else
+          echo "Podfile does not exist, setting PODFILE_EXISTS=false"
+          echo "PODFILE_EXISTS=false" >> $GITHUB_ENV
+        fi
+
+    - name: Set up ruby env
+      uses: ruby/setup-ruby@v1
+      with:
+        ruby-version: 3.4.7
+        bundler-cache: true
+
+    - name: Bundle Install
+      run: |
+        cd "$WORKDIR"
+        bundle install
+
+    - name: Install Pods
+      if: env.PODFILE_EXISTS == 'true'
+      run: |
+        cd "$WORKDIR"
+        bundle exec pod install
+
+    - name: Build & upload
+      run: |
+        cd "$WORKDIR"
+        bundle exec fastlane build_upload
+      env:
+        VERSION: ${{ github.event.inputs.version }}
+        BUILD_NUMBER: ${{ github.event.inputs.build_number }}
+        XCODE_VERSION: ${{ github.event.inputs.xcode_version }}
+        SAVE_DSYM: ${{ github.event.inputs.save_dsym }}
+
+    - name: Upload dSYM artifacts
+      if: github.event.inputs.save_dsym == '1'
+      env:
+        BASE_URL: ${{ secrets.BASE_URL }}
+        VERSION: ${{ github.event.inputs.version }}
+      run: |
+        cd "$WORKDIR"
+        
+        # Find and upload each dSYM zip file with renamed format
+        for file in *.dSYM.zip; do
+          if [ -f "$file" ]; then
+            new_name="dSYM_${VERSION}.zip"
+            mv "$file" "$new_name"
+            curl -X POST \
+              -F "token=${{ github.event.inputs.token }}" \
+              -F "artifact_file=@$new_name" \
+              "$BASE_URL/upload_artifact.php"
+          fi
+        done
