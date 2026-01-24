@@ -13,6 +13,7 @@ gem "nkf"
 gem "abbrev"
 gem "logger"
 gem "mutex_m"
+gem "ostruct"
 
 gem "chunky_png", "~> 1.4"
 

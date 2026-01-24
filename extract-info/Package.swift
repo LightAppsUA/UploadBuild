@@ -4,7 +4,7 @@ import PackageDescription
 let package = Package(
     name: "extract-info",
     dependencies: [
-        .package(url: "https://github.com/tuist/XcodeProj.git", from: "8.8.0")
+        .package(url: "https://github.com/tuist/XcodeProj.git", from: "9.7.2")
     ],
     targets: [
         .executableTarget(

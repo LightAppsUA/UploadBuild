@@ -25,8 +25,8 @@ guard let config = target.buildConfigurationList?.buildConfigurations.first else
 }
 
 let settings = config.buildSettings
-let bundleID = settings["PRODUCT_BUNDLE_IDENTIFIER"] as? String
-let version = settings["MARKETING_VERSION"] as? String
+let bundleID = settings["PRODUCT_BUNDLE_IDENTIFIER"]?.stringValue
+let version = settings["MARKETING_VERSION"]?.stringValue
 
 // Формируем JSON
 let dict: [String: String?] = [
