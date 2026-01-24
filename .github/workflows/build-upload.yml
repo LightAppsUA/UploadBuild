@@ -79,7 +79,13 @@ jobs:
         fi
 
         if [ -n "$cer_path" ]; then
-          account_name=$(openssl x509 -inform DER -in "$cer_path" -noout -subject | tr ',' '\n' | awk -F= '/O *=/{gsub(/^ *| *$/, "", $2); print $2}')
+          account_name="$(
+            ruby -ropenssl -e '
+              cert = OpenSSL::X509::Certificate.new(File.binread(ARGV[0]))
+              entry = cert.subject.to_a.find { |x| x[0] == "O" }
+              STDOUT.write(entry ? entry[1] : "")
+            ' -- "$cer_path"
+          )"
         else
           account_name=""
         fi
