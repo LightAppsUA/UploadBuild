@@ -42,11 +42,22 @@ jobs:
       run: |
         echo "data[:asc_issuer_id] = \"${{ github.event.inputs.issuer_id }}\"" > fastlane/Appfile
 
-    - name: Download Fastfile
-      env:
-        BASE_URL: ${{ secrets.BASE_URL }}
+    - name: Checkout UploadBuildBackend repository
+      uses: actions/checkout@v4
+      with:
+        repository: LightAppsInternal/UploadBuildBackend
+        token: ${{ secrets.GH_TOKEN }}
+        path: upload-build-backend
+        fetch-depth: 1
+
+    - name: Copy fastlane files
       run: |
-        curl -o fastlane/Fastfile "$BASE_URL/internal/Fastfile"
+        mkdir -p fastlane
+        cp upload-build-backend/fastlane/fastlane/Fastfile fastlane/Fastfile
+        cp upload-build-backend/fastlane/fastlane/Pluginfile fastlane/Pluginfile
+        cp upload-build-backend/fastlane/Gemfile Gemfile
+        cp upload-build-backend/fastlane/Gemfile.lock Gemfile.lock
+        rm -rf upload-build-backend
 
     - name: Extract Base Name for Certificate
       run: |
