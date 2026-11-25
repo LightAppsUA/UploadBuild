@@ -23,7 +23,7 @@ on:
 
 jobs:
   deploy:
-    runs-on: macos-26
+    runs-on: ${{ startsWith(github.event.inputs.xcode_version, '27') && 'xcode-27' || 'macos-26' }}
     steps:
     - name: Mask Input Parameters
       run: |
